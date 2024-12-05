@@ -1,158 +1,242 @@
- I understand you want to update the `CameraFragment` to handle real-time detection while maintaining your existing project structure. Here's the compatible implementation:
+ Ah, I apologize for the misunderstanding! You're absolutely right. Each model (whether it's for anomaly or object detection) should work with both real-time and photo detection methods. Let me correct the implementation:
 
-<antArtifact identifier="camera-fragment" type="application/vnd.ant.code" language="kotlin" title="Updated Camera Fragment Implementation">
-package ai.setkpsw.objectdetection.ui.fragments
-
-import android.Manifest
-import android.content.pm.PackageManager
-import android.os.Bundle
-import android.util.Log
-import android.view.LayoutInflater
-import android.view.View
-import android.view.ViewGroup
-import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.*
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
-import androidx.core.content.ContextCompat
-import androidx.fragment.app.Fragment
-import androidx.lifecycle.lifecycleScope
-import ai.setkpsw.objectdetection.R
-import ai.setkpsw.objectdetection.detection.factory.DetectionFactory
-import ai.setkpsw.objectdetection.detection.base.DetectionModel
-import ai.setkpsw.objectdetection.detection.factory.DetectionModelFactory
-import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
-import javax.inject.Inject
-
+<antArtifact identifier="corrected-ui-implementation" type="application/vnd.ant.code" language="kotlin" title="Corrected UI Implementation">
+// ModelSelectionFragment.kt
 @AndroidEntryPoint
-class CameraFragment : Fragment() {
-    @Inject
-    lateinit var detectionFactory: DetectionFactory
-
-    private lateinit var detectionModel: DetectionModel
-    private lateinit var cameraExecutor: ExecutorService
-    private lateinit var previewView: PreviewView
-    private lateinit var detectionOverlay: DetectionOverlay
-    private var imageAnalyzer: ImageAnalysis? = null
-    private var camera: Camera? = null
-    
-    private var processingFrame = false
+class ModelSelectionFragment : Fragment() {
+    private lateinit var binding: FragmentModelSelectionBinding
+    private lateinit var detectionMode: String
 
     companion object {
-        private const val TAG = "CameraFragment"
-        private const val ARG_MODEL_NAME = "modelName"
+        private const val ARG_DETECTION_MODE = "detectionMode"
 
-        fun newInstance(modelName: String): CameraFragment {
-            val args = Bundle()
-            args.putString(ARG_MODEL_NAME, modelName)
-            val fragment = CameraFragment()
-            fragment.arguments = args
-            return fragment
-        }
-    }
-
-    private val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (isGranted) {
-            startCamera()
-        } else {
-            Toast.makeText(context, "Camera permission is required", Toast.LENGTH_SHORT).show()
+        fun newInstance(detectionMode: String) = ModelSelectionFragment().apply {
+            arguments = Bundle().apply {
+                putString(ARG_DETECTION_MODE, detectionMode)
+            }
         }
     }
 
     override fun onCreateView(
-        inflater: LayoutInflater, container: ViewGroup?,
+        inflater: LayoutInflater,
+        container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
-        return inflater.inflate(R.layout.fragment_camera, container, false)
+        binding = FragmentModelSelectionBinding.inflate(inflater, container, false)
+        return binding.root
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-
-        previewView = view.findViewById(R.id.preview_view)
-        detectionOverlay = view.findViewById(R.id.detection_overlay)
-        cameraExecutor = Executors.newSingleThreadExecutor()
-
-        val modelName = arguments?.getString(ARG_MODEL_NAME) ?: return
-        detectionModel = DetectionModelFactory.createModel(modelName)
-            ?: throw IllegalArgumentException("Invalid model name: $modelName")
-
-        val detector = detectionFactory.createDetector(detectionModel)
         
-        checkCameraPermissionAndStart(detector)
+        detectionMode = arguments?.getString(ARG_DETECTION_MODE) 
+            ?: throw IllegalStateException("Detection mode not found!")
+
+        setupModelList()
     }
 
-    private fun checkCameraPermissionAndStart(detector: BaseDetector) {
-        when {
-            ContextCompat.checkSelfPermission(
-                requireContext(),
-                Manifest.permission.CAMERA
-            ) == PackageManager.PERMISSION_GRANTED -> {
-                startCamera(detector)
+    private fun setupModelList() {
+        binding.modelListContainer.removeAllViews()
+
+        // All models are available for both detection modes
+        DetectionModelFactory.getAvailableModels().forEach { modelName ->
+            val modelButton = MaterialButton(requireContext()).apply {
+                text = modelName
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    setMargins(0, 0, 0, 16)
+                }
+                setOnClickListener {
+                    navigateToDetection(modelName)
+                }
             }
-            else -> {
-                requestPermissionLauncher.launch(Manifest.permission.CAMERA)
+            binding.modelListContainer.addView(modelButton)
+        }
+    }
+
+    private fun navigateToDetection(modelName: String) {
+        // Create the appropriate fragment based on detection mode
+        val fragment = when (detectionMode) {
+            "REALTIME" -> CameraFragment.newInstance(modelName)
+            "PHOTO" -> PhotoDetectionFragment.newInstance(modelName)
+            else -> throw IllegalArgumentException("Unknown detection mode: $detectionMode")
+        }
+
+        parentFragmentManager.beginTransaction()
+            .replace(R.id.fragment_container, fragment)
+            .addToBackStack(null)
+            .commit()
+    }
+}
+
+// PhotoDetectionFragment.kt
+@AndroidEntryPoint
+class PhotoDetectionFragment : Fragment() {
+    private lateinit var binding: FragmentPhotoDetectionBinding
+    private var selectedImageBitmap: Bitmap? = null
+    private lateinit var detector: BaseDetector
+    private lateinit var detectionModel: DetectionModel
+
+    @Inject
+    lateinit var detectionFactory: DetectionFactory
+
+    companion object {
+        private const val ARG_MODEL_NAME = "modelName"
+        private const val REQUEST_IMAGE_PICK = 1
+
+        fun newInstance(modelName: String) = PhotoDetectionFragment().apply {
+            arguments = Bundle().apply {
+                putString(ARG_MODEL_NAME, modelName)
             }
         }
     }
 
-    private fun startCamera(detector: BaseDetector) {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        
+        // Initialize detector based on model name
+        val modelName = arguments?.getString(ARG_MODEL_NAME) 
+            ?: throw IllegalStateException("Model name not found!")
+            
+        detectionModel = DetectionModelFactory.createModel(modelName)
+            ?: throw IllegalArgumentException("Invalid model name: $modelName")
+            
+        detector = detectionFactory.createDetector(detectionModel)
+    }
+
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View {
+        binding = FragmentPhotoDetectionBinding.inflate(inflater, container, false)
+        return binding.root
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        setupViews()
+    }
+
+    private fun setupViews() {
+        binding.apply {
+            selectImageButton.setOnClickListener { selectImage() }
+            detectButton.setOnClickListener { runDetection() }
+            modelNameText.text = detectionModel::class.simpleName
+        }
+    }
+
+    private fun runDetection() {
+        selectedImageBitmap?.let { bitmap ->
+            lifecycleScope.launch {
+                try {
+                    val result = detector.detect(
+                        bitmap, 
+                        detectionModel.detectionType
+                    )
+                    binding.detectionOverlay.updateResults(result)
+                } catch (e: Exception) {
+                    Toast.makeText(
+                        context, 
+                        "Detection failed: ${e.message}", 
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+    }
+
+    // ... rest of the PhotoDetectionFragment implementation
+}
+
+// CameraFragment.kt
+@AndroidEntryPoint
+class CameraFragment : Fragment() {
+    private lateinit var binding: FragmentCameraBinding
+    private lateinit var detector: BaseDetector
+    private lateinit var detectionModel: DetectionModel
+    private lateinit var cameraExecutor: ExecutorService
+
+    @Inject
+    lateinit var detectionFactory: DetectionFactory
+
+    companion object {
+        private const val ARG_MODEL_NAME = "modelName"
+
+        fun newInstance(modelName: String) = CameraFragment().apply {
+            arguments = Bundle().apply {
+                putString(ARG_MODEL_NAME, modelName)
+            }
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        
+        // Initialize detector based on model name
+        val modelName = arguments?.getString(ARG_MODEL_NAME) 
+            ?: throw IllegalStateException("Model name not found!")
+            
+        detectionModel = DetectionModelFactory.createModel(modelName)
+            ?: throw IllegalArgumentException("Invalid model name: $modelName")
+            
+        detector = detectionFactory.createDetector(detectionModel)
+        cameraExecutor = Executors.newSingleThreadExecutor()
+    }
+
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View {
+        binding = FragmentCameraBinding.inflate(inflater, container, false)
+        return binding.root
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        
+        binding.modelNameText.text = detectionModel::class.simpleName
+        
+        if (allPermissionsGranted()) {
+            startCamera()
+        } else {
+            requestPermissions()
+        }
+    }
+
+    private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(requireContext())
 
         cameraProviderFuture.addListener({
-            try {
-                val cameraProvider = cameraProviderFuture.get()
-                bindCameraPreview(cameraProvider, detector)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to start camera", e)
-            }
+            val cameraProvider = cameraProviderFuture.get()
+            bindCameraUseCases(cameraProvider)
         }, ContextCompat.getMainExecutor(requireContext()))
     }
 
-    private fun bindCameraPreview(cameraProvider: ProcessCameraProvider, detector: BaseDetector) {
-        // Configure Preview
+    private fun bindCameraUseCases(cameraProvider: ProcessCameraProvider) {
+        // Set up camera preview
         val preview = Preview.Builder()
-            .setTargetResolution(Size(
-                detectionModel.modelConfig.inputSize.first,
-                detectionModel.modelConfig.inputSize.second
-            ))
             .build()
             .also {
-                it.setSurfaceProvider(previewView.surfaceProvider)
+                it.setSurfaceProvider(binding.previewView.surfaceProvider)
             }
 
-        // Configure ImageAnalysis
-        imageAnalyzer = ImageAnalysis.Builder()
-            .setTargetResolution(Size(
-                detectionModel.modelConfig.inputSize.first,
-                detectionModel.modelConfig.inputSize.second
-            ))
+        // Set up image analysis
+        val imageAnalyzer = ImageAnalysis.Builder()
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
             .also {
                 it.setAnalyzer(cameraExecutor) { imageProxy ->
-                    if (!processingFrame) {
-                        processImage(imageProxy, detector)
-                    } else {
-                        imageProxy.close()
-                    }
+                    processImage(imageProxy)
                 }
             }
 
         try {
-            // Unbind any bound use cases before rebinding
             cameraProvider.unbindAll()
-
-            // Bind use cases to camera
-            camera = cameraProvider.bindToLifecycle(
+            cameraProvider.bindToLifecycle(
                 viewLifecycleOwner,
                 CameraSelector.DEFAULT_BACK_CAMERA,
                 preview,
@@ -163,70 +247,48 @@ class CameraFragment : Fragment() {
         }
     }
 
-    private fun processImage(imageProxy: ImageProxy, detector: BaseDetector) {
-        processingFrame = true
-        
-        lifecycleScope.launch(Dispatchers.Default) {
+    private fun processImage(imageProxy: ImageProxy) {
+        // Convert ImageProxy to Bitmap and run detection
+        val bitmap = imageProxy.toBitmap()
+        lifecycleScope.launch {
             try {
-                val bitmap = imageProxy.toBitmap()
-                
-                // Use the detector to process the image
-                val detectionResult = detector.detect(bitmap, detectionModel.detectionType)
-                
-                // Update UI with results
-                withContext(Dispatchers.Main) {
-                    detectionOverlay.updateResults(detectionResult)
-                }
+                val result = detector.detect(
+                    bitmap, 
+                    detectionModel.detectionType
+                )
+                binding.detectionOverlay.updateResults(result)
             } catch (e: Exception) {
-                Log.e(TAG, "Error processing frame: ${e.message}")
+                Log.e(TAG, "Detection failed", e)
             } finally {
-                processingFrame = false
                 imageProxy.close()
             }
         }
     }
 
-    override fun onDestroyView() {
-        super.onDestroyView()
-        cameraExecutor.shutdown()
-    }
+    // ... rest of the CameraFragment implementation
 }
 </antArtifact>
 
-Key points about this implementation:
+Key changes in this corrected version:
 
-1. It maintains your existing dependency injection structure using Hilt
-2. Uses your existing `DetectionFactory` and `DetectionModel` abstractions
-3. Properly handles camera lifecycle within the Fragment
-4. Processes frames using your detector implementation
-5. Updates the UI using your detection overlay
+1. Both PhotoDetectionFragment and CameraFragment:
+- Can work with any model type (YOLO, MobileNet, PADIM, PatchCore)
+- Use the generic BaseDetector interface
+- Initialize the appropriate detector through DetectionFactory
 
-Make sure you have the following layout file (fragment_camera.xml):
+2. ModelSelectionFragment:
+- Shows all available models for both detection modes
+- No filtering based on model type
 
-```xml
-<?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent">
+3. Proper Model Initialization:
+- Models are created through DetectionModelFactory
+- Detectors are created through DetectionFactory
+- Each fragment can handle any type of detection
 
-    <androidx.camera.view.PreviewView
-        android:id="@+id/preview_view"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+This structure allows:
+- Any model to be used in both real-time and photo modes
+- Proper dependency injection
+- Clear separation of concerns
+- Type-safe detection
 
-    <ai.setkpsw.objectdetection.ui.views.DetectionOverlay
-        android:id="@+id/detection_overlay"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent" />
-
-</FrameLayout>
-```
-
-The implementation:
-1. Integrates with your existing model selection workflow
-2. Handles camera permissions
-3. Sets up real-time frame analysis
-4. Uses your detection factory and models
-5. Updates the UI with detection results
-
-Would you like me to explain any part in more detail or help with additional components?
+Would you like me to explain any specific part in more detail?
