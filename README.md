@@ -1,3 +1,285 @@
+// ModelAdapter.kt
+class ModelAdapter(
+    private val models: List<ModelItem>,
+    private val onModelSelected: (String) -> Unit
+) : RecyclerView.Adapter<ModelAdapter.ModelViewHolder>() {
+
+    class ModelViewHolder(private val binding: ItemModelBinding) : 
+        RecyclerView.ViewHolder(binding.root) {
+        
+        fun bind(item: ModelItem, onModelSelected: (String) -> Unit) {
+            binding.apply {
+                modelTitle.text = item.name
+                modelDescription.text = item.description
+                modelType.text = item.type
+                modelIcon.setImageResource(item.iconRes)
+                
+                root.setOnClickListener {
+                    onModelSelected(item.name)
+                }
+            }
+        }
+    }
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ModelViewHolder {
+        val binding = ItemModelBinding.inflate(
+            LayoutInflater.from(parent.context), parent, false
+        )
+        return ModelViewHolder(binding)
+    }
+
+    override fun onBindViewHolder(holder: ModelViewHolder, position: Int) {
+        holder.bind(models[position], onModelSelected)
+    }
+
+    override fun getItemCount() = models.size
+}
+
+// ModelItem.kt
+data class ModelItem(
+    val name: String,
+    val description: String,
+    val type: String,
+    @DrawableRes val iconRes: Int
+)
+
+// ModelSelectionFragment.kt
+@AndroidEntryPoint
+class ModelSelectionFragment : Fragment() {
+    private var _binding: FragmentModelSelectionBinding? = null
+    private val binding get() = _binding!!
+
+    private lateinit var detectionMode: String
+
+    companion object {
+        private const val ARG_DETECTION_MODE = "detectionMode"
+
+        fun newInstance(detectionMode: String): ModelSelectionFragment {
+            return ModelSelectionFragment().apply {
+                arguments = Bundle().apply {
+                    putString(ARG_DETECTION_MODE, detectionMode)
+                }
+            }
+        }
+    }
+
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View {
+        _binding = FragmentModelSelectionBinding.inflate(inflater, container, false)
+        return binding.root
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        
+        detectionMode = arguments?.getString(ARG_DETECTION_MODE)
+            ?: throw IllegalStateException("Detection mode not found!")
+
+        setupToolbar()
+        setupRecyclerView()
+    }
+
+    private fun setupToolbar() {
+        binding.toolbar.apply {
+            title = when (detectionMode) {
+                "REALTIME" -> "Select Real-time Detection Model"
+                "PHOTO" -> "Select Photo Detection Model"
+                else -> "Select Model"
+            }
+            setNavigationOnClickListener {
+                findNavController().navigateUp()
+            }
+        }
+    }
+
+    private fun setupRecyclerView() {
+        val models = getAvailableModels()
+        
+        binding.recyclerView.apply {
+            layoutManager = LinearLayoutManager(context)
+            addItemDecoration(
+                MaterialDividerItemDecoration(
+                    context, 
+                    LinearLayoutManager.VERTICAL
+                ).apply {
+                    dividerInsetStart = resources.getDimensionPixelSize(R.dimen.divider_inset)
+                    dividerInsetEnd = resources.getDimensionPixelSize(R.dimen.divider_inset)
+                }
+            )
+            adapter = ModelAdapter(models) { modelName ->
+                startDetection(modelName)
+            }
+        }
+    }
+
+    private fun getAvailableModels(): List<ModelItem> {
+        return when (detectionMode) {
+            "REALTIME" -> listOf(
+                ModelItem(
+                    name = "YOLO",
+                    description = "Real-time object detection using YOLO model",
+                    type = "Object Detection",
+                    iconRes = R.drawable.ic_object_detection
+                ),
+                // Add other real-time models
+            )
+            "PHOTO" -> listOf(
+                ModelItem(
+                    name = "PADIM",
+                    description = "Industrial anomaly detection using PADIM",
+                    type = "Anomaly Detection",
+                    iconRes = R.drawable.ic_anomaly_detection
+                ),
+                // Add other photo-based models
+            )
+            else -> emptyList()
+        }
+    }
+
+    private fun startDetection(modelName: String) {
+        val fragment = when (detectionMode) {
+            "REALTIME" -> CameraFragment.newInstance(modelName)
+            "PHOTO" -> PhotoDetectionFragment.newInstance(modelName)
+            else -> throw IllegalArgumentException("Unknown detection mode: $detectionMode")
+        }
+
+        parentFragmentManager.beginTransaction()
+            .replace(R.id.fragment_container, fragment)
+            .addToBackStack(null)
+            .commit()
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        _binding = null
+    }
+}
+```
+
+Layout files:
+
+```xml
+<!-- fragment_model_selection.xml -->
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        android:background="?attr/colorPrimary"
+        android:elevation="4dp"
+        app:navigationIcon="@drawable/ic_arrow_back"
+        app:titleTextColor="?attr/colorOnPrimary" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/recyclerView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:clipToPadding="false"
+        android:padding="8dp" />
+
+</LinearLayout>
+
+<!-- item_model.xml -->
+<?xml version="1.0" encoding="utf-8"?>
+<com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginHorizontal="8dp"
+    android:layout_marginVertical="4dp"
+    app:cardElevation="2dp">
+
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="16dp">
+
+        <ImageView
+            android:id="@+id/modelIcon"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent"
+            tools:src="@drawable/ic_object_detection" />
+
+        <TextView
+            android:id="@+id/modelTitle"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:textAppearance="?attr/textAppearanceTitleMedium"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toEndOf="@id/modelIcon"
+            app:layout_constraintTop_toTopOf="@id/modelIcon"
+            tools:text="YOLO Model" />
+
+        <com.google.android.material.chip.Chip
+            android:id="@+id/modelType"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            app:layout_constraintStart_toStartOf="@id/modelTitle"
+            app:layout_constraintTop_toBottomOf="@id/modelTitle"
+            tools:text="Object Detection" />
+
+        <TextView
+            android:id="@+id/modelDescription"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textAppearance="?attr/textAppearanceBodyMedium"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="@id/modelTitle"
+            app:layout_constraintTop_toBottomOf="@id/modelType"
+            tools:text="Real-time object detection using YOLO model" />
+
+    </androidx.constraintlayout.widget.ConstraintLayout>
+
+</com.google.android.material.card.MaterialCardView>
+```
+
+Add these values to your resources:
+
+```xml
+<!-- dimens.xml -->
+<resources>
+    <dimen name="divider_inset">16dp</dimen>
+</resources>
+```
+
+This implementation provides:
+
+1. Material Design card-based UI for model selection
+2. Clear model information display with icons and descriptions
+3. Proper navigation handling
+4. Different model lists based on detection mode
+5. View Binding for safe view access
+6. RecyclerView with dividers and proper spacing
+
+To use this, you'll need these dependencies:
+
+```gradle
+dependencies {
+    implementation 'androidx.recyclerview:recyclerview:1.3.2'
+    implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+}
+```
+
+Would you like me to explain any part in more detail or show how to implement additional features?
+
+
+
  Ah, I apologize for the misunderstanding! You're absolutely right. Each model (whether it's for anomaly or object detection) should work with both real-time and photo detection methods. Let me correct the implementation:
 
 <antArtifact identifier="corrected-ui-implementation" type="application/vnd.ant.code" language="kotlin" title="Corrected UI Implementation">
