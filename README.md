@@ -1,270 +1,478 @@
- I see you have a layout for real-time detection with PreviewView and DetectionOverlay. Here's the corresponding CameraFragment implementation that matches your layout:
+ I see the error is related to uninitialized OnnxExecutor session. Let's fix this initialization issue in the AnomalyDetector and OnnxExecutor classes:
 
-<antArtifact identifier="camera-fragment" type="application/vnd.ant.code" language="kotlin" title="Camera Fragment Implementation">
+<antArtifact identifier="fixed-executor" type="application/vnd.ant.code" language="kotlin" title="Fixed Executor Implementation">
 ```kotlin
-@AndroidEntryPoint
-class CameraFragment : Fragment() {
-    private var _binding: FragmentCameraBinding? = null
-    private val binding get() = _binding!!
+// OnnxExecutor.kt
+@Singleton
+class OnnxExecutor @Inject constructor(
+    private val context: Context,
+    private val ortEnvironment: OrtEnvironment
+) : BaseExecutor {
+    private var ortSession: OrtSession? = null
+    private val initializationLock = Object()
 
-    private lateinit var cameraExecutor: ExecutorService
-    private lateinit var detector: BaseDetector
-    private lateinit var detectionModel: DetectionModel
-    
-    @Inject
-    lateinit var detectionFactory: DetectionFactory
-
-    companion object {
-        private const val TAG = "CameraFragment"
-        private const val REQUEST_CODE_PERMISSIONS = 10
-        private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
-
-        fun newInstance(modelName: String) = CameraFragment().apply {
-            arguments = Bundle().apply {
-                putString(ARG_MODEL_NAME, modelName)
+    override suspend fun initialize(modelConfig: ModelConfig) = withContext(Dispatchers.IO) {
+        synchronized(initializationLock) {
+            if (ortSession == null) {
+                try {
+                    val modelBytes = context.assets.open(modelConfig.modelPath).readBytes()
+                    ortSession = ortEnvironment.createSession(modelBytes)
+                } catch (e: Exception) {
+                    throw ExecutorInitializationException("Failed to initialize ONNX session", e)
+                }
             }
         }
     }
 
-    private val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (isGranted) {
-            startCamera()
-        } else {
-            Toast.makeText(context, "Camera permission is required", Toast.LENGTH_SHORT).show()
-            activity?.onBackPressed()
+    override suspend fun runInference(preprocessed: Any): Any {
+        val session = ortSession ?: throw ExecutorNotInitializedException("ONNX session not initialized")
+        
+        return withContext(Dispatchers.Default) {
+            try {
+                val inputTensor = when (preprocessed) {
+                    is FloatArray -> OnnxTensor.createTensor(
+                        ortEnvironment,
+                        FloatBuffer.wrap(preprocessed),
+                        longArrayOf(1, 3, 224, 224) // Adjust based on your model
+                    )
+                    else -> throw IllegalArgumentException("Unsupported input type")
+                }
+
+                inputTensor.use { input ->
+                    val outputTensor = session.run(mapOf("input" to input))
+                    outputTensor[0].value
+                }
+            } catch (e: Exception) {
+                throw ExecutorInferenceException("Failed to run ONNX inference", e)
+            }
         }
     }
+
+    override fun close() {
+        ortSession?.close()
+        ortSession = null
+    }
+}
+
+// ExecutorInitializationException.kt
+class ExecutorInitializationException(message: String, cause: Throwable? = null) : 
+    Exception(message, cause)
+
+class ExecutorNotInitializedException(message: String) : Exception(message)
+
+class ExecutorInferenceException(message: String, cause: Throwable? = null) : 
+    Exception(message, cause)
+
+// AnomalyDetector.kt
+@Singleton
+class AnomalyDetector @Inject constructor(
+    private val executor: BaseExecutor,
+    private val processingStrategy: ProcessingStrategy
+) : BaseDetector {
+
+    private var isInitialized = false
+    private val initializationLock = Object()
+
+    override suspend fun initialize(model: DetectionModel) {
+        synchronized(initializationLock) {
+            if (!isInitialized) {
+                executor.initialize(model.modelConfig)
+                isInitialized = true
+            }
+        }
+    }
+
+    override suspend fun detect(input: Bitmap, detectionType: DetectionType): DetectionResult {
+        if (!isInitialized) {
+            throw DetectorNotInitializedException("Detector not initialized")
+        }
+
+        return withContext(Dispatchers.Default) {
+            try {
+                // Preprocess
+                val preprocessStartTime = System.nanoTime()
+                val preprocessed = processingStrategy.preprocess(input)
+                val preprocessTime = System.nanoTime() - preprocessStartTime
+
+                // Run inference
+                val inferenceStartTime = System.nanoTime()
+                val rawOutput = executor.runInference(preprocessed)
+                val inferenceTime = System.nanoTime() - inferenceStartTime
+
+                // Postprocess
+                val postprocessStartTime = System.nanoTime()
+                val result = processingStrategy.postprocess(rawOutput)
+                val postprocessTime = System.nanoTime() - postprocessStartTime
+
+                // Return result with timing information
+                DetectionResultWithTiming(
+                    result = result,
+                    preprocessTime = preprocessTime / 1_000_000, // Convert to milliseconds
+                    inferenceTime = inferenceTime / 1_000_000,
+                    postprocessTime = postprocessTime / 1_000_000
+                )
+            } catch (e: Exception) {
+                throw DetectionException("Detection failed", e)
+            }
+        }
+    }
+
+    override fun close() {
+        executor.close()
+        isInitialized = false
+    }
+}
+
+// CameraFragment.kt - Update the initialization
+@AndroidEntryPoint
+class CameraFragment : Fragment() {
+    // ... other properties ...
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        val modelName = arguments?.getString(ARG_MODEL_NAME) 
-            ?: throw IllegalStateException("Model name not found!")
-            
-        detectionModel = DetectionModelFactory.createModel(modelName)
-            ?: throw IllegalArgumentException("Invalid model name: $modelName")
-            
-        detector = detectionFactory.createDetector(detectionModel)
-        cameraExecutor = Executors.newSingleThreadExecutor()
-    }
-
-    override fun onCreateView(
-        inflater: LayoutInflater,
-        container: ViewGroup?,
-        savedInstanceState: Bundle?
-    ): View {
-        _binding = FragmentCameraBinding.inflate(inflater, container, false)
-        return binding.root
-    }
-
-    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        super.onViewCreated(view, savedInstanceState)
-        
-        if (allPermissionsGranted()) {
-            startCamera()
-        } else {
-            requestPermissionLauncher.launch(Manifest.permission.CAMERA)
-        }
-    }
-
-    private fun startCamera() {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(requireContext())
-
-        cameraProviderFuture.addListener({
+        lifecycleScope.launch {
             try {
-                val cameraProvider = cameraProviderFuture.get()
-                bindCameraUseCases(cameraProvider)
-            } catch (e: Exception) {
-                Log.e(TAG, "Use case binding failed", e)
-            }
-        }, ContextCompat.getMainExecutor(requireContext()))
-    }
-
-    private fun bindCameraUseCases(cameraProvider: ProcessCameraProvider) {
-        val preview = Preview.Builder()
-            .setTargetAspectRatio(AspectRatio.RATIO_16_9)
-            .build()
-            .also {
-                it.setSurfaceProvider(binding.previewView.surfaceProvider)
-            }
-
-        val imageAnalyzer = ImageAnalysis.Builder()
-            .setTargetAspectRatio(AspectRatio.RATIO_16_9)
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .build()
-            .also {
-                it.setAnalyzer(cameraExecutor) { imageProxy ->
-                    processImage(imageProxy)
-                }
-            }
-
-        try {
-            // Unbind any bound use cases before rebinding
-            cameraProvider.unbindAll()
-
-            // Bind use cases to camera
-            cameraProvider.bindToLifecycle(
-                viewLifecycleOwner,
-                CameraSelector.DEFAULT_BACK_CAMERA,
-                preview,
-                imageAnalyzer
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Use case binding failed", e)
-        }
-    }
-
-    private fun processImage(imageProxy: ImageProxy) {
-        lifecycleScope.launch(Dispatchers.Default) {
-            try {
-                imageProxy.use { proxy ->
-                    // Convert ImageProxy to Bitmap
-                    val bitmap = proxy.toBitmap()
-                    
-                    bitmap?.let {
-                        // Run detection
-                        val result = detector.detect(it, detectionModel.detectionType)
-                        
-                        // Update UI on main thread
-                        withContext(Dispatchers.Main) {
-                            binding.detectionOverlay.updateResults(result)
-                        }
+                val modelName = arguments?.getString(ARG_MODEL_NAME) 
+                    ?: throw IllegalStateException("Model name not found!")
+                
+                detectionModel = DetectionModelFactory.createModel(modelName)
+                    ?: throw IllegalArgumentException("Invalid model name: $modelName")
+                
+                detector = detectionFactory.createDetector(detectionModel)
+                // Initialize the detector
+                detector.initialize(detectionModel)
+                
+                // Start camera after initialization
+                withContext(Dispatchers.Main) {
+                    if (allPermissionsGranted()) {
+                        startCamera()
+                    } else {
+                        requestPermissionLauncher.launch(Manifest.permission.CAMERA)
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Detection failed", e)
+                Log.e(TAG, "Failed to initialize detector", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        context,
+                        "Failed to initialize detector: ${e.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    activity?.onBackPressed()
+                }
             }
         }
     }
 
-    private fun allPermissionsGranted() = REQUIRED_PERMISSIONS.all {
-        ContextCompat.checkSelfPermission(
-            requireContext(), it
-        ) == PackageManager.PERMISSION_GRANTED
-    }
-
-    override fun onDestroyView() {
-        super.onDestroyView()
-        _binding = null
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        cameraExecutor.shutdown()
-    }
+    // ... rest of the implementation ...
 }
+```
 
-// FragmentCameraBinding.kt
-class FragmentCameraBinding private constructor(
-    private val rootView: View,
-    val previewView: PreviewView,
-    val detectionOverlay: DetectionOverlay
-) {
-    val root: View = rootView
+Key changes made:
 
-    companion object {
-        fun inflate(
-            inflater: LayoutInflater,
-            parent: ViewGroup?,
-            attachToParent: Boolean
-        ): FragmentCameraBinding {
-            val root = inflater.inflate(
-                R.layout.fragment_camera,
-                parent,
-                attachToParent
-            )
+1. Added proper initialization in OnnxExecutor:
+- Thread-safe session initialization
+- Proper error handling
+- Session state checking
 
-            return FragmentCameraBinding(
-                rootView = root,
-                previewView = root.findViewById(R.id.preview_view),
-                detectionOverlay = root.findViewById(R.id.detection_overlay)
-            )
+2. Enhanced AnomalyDetector:
+- Thread-safe initialization
+- State validation
+- Detailed timing information
+
+3. Updated CameraFragment:
+- Asynchronous initialization
+- Better error handling
+- UI feedback
+
+4. Added specific exceptions:
+- ExecutorInitializationException
+- ExecutorNotInitializedException
+- ExecutorInferenceException
+
+The initialization flow is now:
+1. CameraFragment creates detector
+2. Detector initializes executor
+3. Executor creates ONNX session
+4. Camera starts only after successful initialization
+
+To use this:
+
+1. Ensure proper dependencies:
+```gradle
+dependencies {
+    implementation "com.microsoft.onnxruntime:onnxruntime-android:1.12.1"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.4"
+}
+```
+
+2. Add proguard rules if needed:
+```proguard
+-keep class com.microsoft.onnxruntime.** { *; }
+```
+
+Would you like me to explain any part in more detail or add additional functionality?</antArtifact>
+
+
+
+ I'll provide the TensorFlow initialization and executor implementation:
+
+<antArtifact identifier="tensorflow-executor" type="application/vnd.ant.code" language="kotlin" title="TensorFlow Executor Implementation">
+```kotlin
+// TFLiteExecutor.kt
+@Singleton
+class TFLiteExecutor @Inject constructor(
+    private val context: Context
+) : BaseExecutor {
+    private var interpreter: Interpreter? = null
+    private val initializationLock = Object()
+
+    override suspend fun initialize(modelConfig: ModelConfig) = withContext(Dispatchers.IO) {
+        synchronized(initializationLock) {
+            if (interpreter == null) {
+                try {
+                    // Create interpreter options
+                    val options = Interpreter.Options().apply {
+                        setNumThreads(4) // Adjust based on your needs
+                        setUseNNAPI(true) // Enable Neural Network API if available
+                    }
+
+                    // Load model file
+                    val modelFile = FileUtil.loadMappedFile(
+                        context,
+                        modelConfig.modelPath
+                    )
+
+                    // Create interpreter
+                    interpreter = Interpreter(modelFile, options)
+
+                } catch (e: Exception) {
+                    throw ExecutorInitializationException(
+                        "Failed to initialize TFLite interpreter", 
+                        e
+                    )
+                }
+            }
+        }
+    }
+
+    override suspend fun runInference(preprocessed: Any): Any {
+        val tflite = interpreter ?: throw ExecutorNotInitializedException(
+            "TFLite interpreter not initialized"
+        )
+
+        return withContext(Dispatchers.Default) {
+            try {
+                when (preprocessed) {
+                    is FloatArray -> {
+                        // Get input and output shapes from the model
+                        val inputShape = tflite.getInputTensor(0).shape()
+                        val outputShape = tflite.getOutputTensor(0).shape()
+
+                        // Prepare input buffer
+                        val inputBuffer = preprocessed.toDirectBuffer()
+
+                        // Prepare output buffer based on output shape
+                        val outputBuffer = ByteBuffer.allocateDirect(
+                            outputShape.reduce { acc, i -> acc * i } * 4
+                        ).apply {
+                            order(ByteOrder.nativeOrder())
+                        }
+
+                        // Run inference
+                        tflite.run(inputBuffer, outputBuffer)
+
+                        // Convert output buffer to float array
+                        val outputArray = FloatArray(outputShape.reduce { acc, i -> acc * i })
+                        outputBuffer.rewind()
+                        outputBuffer.asFloatBuffer().get(outputArray)
+
+                        outputArray
+                    }
+                    is ByteBuffer -> {
+                        val outputBuffer = ByteBuffer.allocateDirect(
+                            tflite.getOutputTensor(0).shape().reduce { acc, i -> acc * i } * 4
+                        ).apply {
+                            order(ByteOrder.nativeOrder())
+                        }
+
+                        tflite.run(preprocessed, outputBuffer)
+                        outputBuffer
+                    }
+                    else -> throw IllegalArgumentException("Unsupported input type")
+                }
+            } catch (e: Exception) {
+                throw ExecutorInferenceException("Failed to run TFLite inference", e)
+            }
+        }
+    }
+
+    override fun close() {
+        interpreter?.close()
+        interpreter = null
+    }
+
+    private fun FloatArray.toDirectBuffer(): ByteBuffer {
+        return ByteBuffer.allocateDirect(size * 4).apply {
+            order(ByteOrder.nativeOrder())
+            asFloatBuffer().put(this@toDirectBuffer)
         }
     }
 }
+
+// Extension functions for TensorFlow Lite
+object TFLiteUtils {
+    fun loadModelFile(context: Context, modelPath: String): MappedByteBuffer {
+        return context.assets.openFd(modelPath).use { fileDescriptor ->
+            FileInputStream(fileDescriptor.fileDescriptor).use { inputStream ->
+                val startOffset = fileDescriptor.startOffset
+                val declaredLength = fileDescriptor.declaredLength
+                val fileChannel = inputStream.channel
+                fileChannel.map(
+                    FileChannel.MapMode.READ_ONLY,
+                    startOffset,
+                    declaredLength
+                )
+            }
+        }
+    }
+
+    fun createInterpreterOptions(
+        numThreads: Int = 4,
+        useNNAPI: Boolean = true,
+        useGPU: Boolean = false
+    ): Interpreter.Options {
+        return Interpreter.Options().apply {
+            setNumThreads(numThreads)
+            if (useNNAPI) {
+                addDelegate(NnApiDelegate())
+            }
+            if (useGPU) {
+                val compatList = CompatibilityList()
+                if (compatList.isDelegateSupportedOnThisDevice) {
+                    addDelegate(GpuDelegate(compatList.bestOptionsForThisDevice))
+                }
+            }
+        }
+    }
+
+    fun getInputOutputDetails(interpreter: Interpreter): Pair<Array<Int>, Array<Int>> {
+        val inputShape = interpreter.getInputTensor(0).shape()
+        val outputShape = interpreter.getOutputTensor(0).shape()
+        return Pair(inputShape, outputShape)
+    }
+}
+
+// Custom Configuration for TFLite
+data class TFLiteConfig(
+    val numThreads: Int = 4,
+    val useNNAPI: Boolean = true,
+    val useGPU: Boolean = false,
+    val inputShape: Array<Int>,
+    val outputShape: Array<Int>
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+
+        other as TFLiteConfig
+
+        if (numThreads != other.numThreads) return false
+        if (useNNAPI != other.useNNAPI) return false
+        if (useGPU != other.useGPU) return false
+        if (!inputShape.contentEquals(other.inputShape)) return false
+        if (!outputShape.contentEquals(other.outputShape)) return false
+
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = numThreads
+        result = 31 * result + useNNAPI.hashCode()
+        result = 31 * result + useGPU.hashCode()
+        result = 31 * result + inputShape.contentHashCode()
+        result = 31 * result + outputShape.contentHashCode()
+        return result
+    }
+}
+
+// Usage in YoloModel or other TFLite-based models
+data class YoloModel(
+    override val modelConfig: ModelConfig = ModelConfig(
+        metaDataPath = "yolo_metadata.json",
+        modelNameWithExtension = "yolo.tflite",
+        modelPath = "yolo.tflite",
+        inputSize = Pair(416, 416),
+        threshold = 0.5f
+    ),
+    override val executorType: ExecutorType = ExecutorType.TFLITE,
+    override val detectionType: DetectionType = DetectionType.OBJECT,
+    val tfliteConfig: TFLiteConfig = TFLiteConfig(
+        inputShape = arrayOf(1, 416, 416, 3),
+        outputShape = arrayOf(1, 80, 4) // Adjust based on your YOLO model
+    )
+) : DetectionModel
 ```
 
-And your layout file (fragment_camera.xml):
+Add these dependencies to your build.gradle:
+```gradle
+dependencies {
+    // TensorFlow Lite
+    implementation 'org.tensorflow:tensorflow-lite:2.9.0'
+    implementation 'org.tensorflow:tensorflow-lite-gpu:2.9.0'
+    implementation 'org.tensorflow:tensorflow-lite-support:0.4.2'
+    
+    // Optional: for NNAPI delegate
+    implementation 'org.tensorflow:tensorflow-lite-api:2.9.0'
+}
+```
+
+And these features to your AndroidManifest.xml:
 ```xml
-<?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent">
+<manifest>
+    <uses-feature android:name="android.hardware.camera" />
+    <uses-feature android:name="android.hardware.camera.autofocus" />
+    
+    <!-- Optional: for GPU acceleration -->
+    <uses-feature android:name="android.hardware.opengles.aep" android:required="false" />
+</manifest>
+```
 
-    <androidx.camera.view.PreviewView
-        android:id="@+id/preview_view"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+Key features:
 
-    <ai.setkpsw.objectdetection.ui.views.DetectionOverlay
-        android:id="@+id/detection_overlay"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+1. Flexible Input/Output Handling:
+- Supports both FloatArray and ByteBuffer inputs
+- Automatic buffer management
+- Shape inference
 
-</FrameLayout>
-</antArtifact>
+2. Performance Optimizations:
+- NNAPI support
+- GPU delegate support
+- Multi-threading
+- Direct buffer usage
 
-Key features of this implementation:
-
-1. Proper Camera Setup:
-- Uses CameraX for preview and analysis
-- Handles permissions correctly
-- Efficient image processing pipeline
-
-2. Detection Integration:
-- Uses your detector and model architecture
-- Processes frames on background thread
-- Updates UI on main thread
-
-3. Lifecycle Management:
-- Proper binding cleanup
-- Executor shutdown
-- View binding nulling
+3. Resource Management:
+- Proper interpreter lifecycle
+- Memory efficient
+- Thread-safe initialization
 
 4. Error Handling:
-- Permission checks
-- Camera setup failures
-- Processing exceptions
+- Specific exceptions
+- Detailed error messages
+- Graceful fallbacks
 
-To optimize performance, you might want to add:
-
-1. Frame Processing Control:
+Usage example:
 ```kotlin
-private var isProcessing = AtomicBoolean(false)
+// In your detector
+val tfliteExecutor = TFLiteExecutor(context)
+tfliteExecutor.initialize(modelConfig)
 
-private fun processImage(imageProxy: ImageProxy) {
-    if (isProcessing.get()) {
-        imageProxy.close()
-        return
-    }
-    
-    isProcessing.set(true)
-    // ... your processing code ...
-    isProcessing.set(false)
-}
+// Run inference
+val result = tfliteExecutor.runInference(preprocessedData)
+
+// Clean up
+tfliteExecutor.close()
 ```
 
-2. Resolution Control:
-```kotlin
-private fun getTargetResolution(): Size {
-    val screenSize = Point()
-    requireActivity().windowManager.defaultDisplay.getSize(screenSize)
-    return Size(screenSize.x, screenSize.y)
-}
-```
-
-3. Camera Selector:
-```kotlin
-private fun getCameraSelector(): CameraSelector {
-    return try {
-        if (hasBackCamera()) CameraSelector.DEFAULT_BACK_CAMERA
-        else CameraSelector.DEFAULT_FRONT_CAMERA
-    } catch (e: Exception) {
-        CameraSelector.DEFAULT_BACK_CAMERA
-    }
-}
-```
-
-Would you like me to explain any part in more detail or show how to implement additional features?
+Would you like me to explain any specific part in more detail or add additional functionality?</antArtifact>
