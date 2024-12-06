@@ -1,8 +1,124 @@
- I'll help you modify the layout and CameraFragment to achieve a fullscreen camera preview with overlaid detection results:
+ I'll help you fix the UI issues and implement a full-screen camera. Here's the solution:
 
-<antArtifact identifier="fullscreen-camera" type="application/vnd.ant.code" language="kotlin" title="Fullscreen Camera Implementation">
-```xml
-<!-- fragment_camera.xml -->
+<antArtifact identifier="fullscreen-ui" type="application/vnd.ant.code" language="kotlin" title="Fixed UI Implementation">
+```kotlin
+// DetectionActivity.kt
+@AndroidEntryPoint
+class DetectionActivity : AppCompatActivity() {
+    private lateinit var binding: ActivityDetectionBinding
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        binding = ActivityDetectionBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+
+        binding.apply {
+            buttonContainer.visibility = View.VISIBLE
+            fragmentContainer.visibility = View.GONE
+
+            realtimeDetectionButton.setOnClickListener {
+                navigateToModelSelection("REALTIME")
+            }
+            photoDetectionButton.setOnClickListener {
+                navigateToModelSelection("PHOTO")
+            }
+        }
+    }
+
+    private fun navigateToModelSelection(detectionMode: String) {
+        binding.apply {
+            buttonContainer.visibility = View.GONE
+            fragmentContainer.visibility = View.VISIBLE
+        }
+
+        val fragment = ModelSelectionFragment.newInstance(detectionMode)
+        supportFragmentManager.beginTransaction()
+            .replace(R.id.fragment_container, fragment)
+            .addToBackStack(null)
+            .commit()
+    }
+
+    override fun onBackPressed() {
+        if (supportFragmentManager.backStackEntryCount > 0) {
+            supportFragmentManager.popBackStack()
+            if (supportFragmentManager.backStackEntryCount == 1) {
+                binding.apply {
+                    buttonContainer.visibility = View.VISIBLE
+                    fragmentContainer.visibility = View.GONE
+                }
+            }
+        } else {
+            super.onBackPressed()
+        }
+    }
+}
+
+// activity_detection.xml
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:id="@+id/button_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <Button
+            android:id="@+id/realtime_detection_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="REALTIME DETECTION" />
+
+        <Button
+            android:id="@+id/photo_detection_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="PHOTO DETECTION" />
+    </LinearLayout>
+
+    <FrameLayout
+        android:id="@+id/fragment_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
+</FrameLayout>
+
+// CameraFragment.kt
+@AndroidEntryPoint
+class CameraFragment : Fragment() {
+    // ... other properties
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // Make the fragment fullscreen
+        requireActivity().window.apply {
+            addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
+            decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)
+        }
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        // Restore window flags when fragment is destroyed
+        requireActivity().window.apply {
+            clearFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
+            decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+        }
+    }
+}
+
+// fragment_camera.xml
 <?xml version="1.0" encoding="utf-8"?>
 <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -30,236 +146,59 @@
         app:layout_constraintTop_toTopOf="@id/preview_view" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>
-```
 
-Update the CameraFragment to handle fullscreen:
-
-```kotlin
-@AndroidEntryPoint
-class CameraFragment : Fragment() {
-    // ... other properties
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        // Make the fragment fullscreen
-        requireActivity().window.apply {
-            addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
-            statusBarColor = Color.TRANSPARENT
-            decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
-        }
-    }
-
-    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        super.onViewCreated(view, savedInstanceState)
-        setupCamera()
-    }
-
-    private fun setupCamera() {
-        binding.previewView.apply {
-            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
-            scaleType = PreviewView.ScaleType.FILL_START
-        }
-
-        lifecycleScope.launch {
-            try {
-                detector.initialize()
-                withContext(Dispatchers.Main) {
-                    if (allPermissionsGranted()) {
-                        startCamera()
-                    } else {
-                        requestCameraPermission()
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to initialize detector", e)
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(
-                        context,
-                        "Failed to initialize detector: ${e.message}",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                    activity?.onBackPressed()
-                }
-            }
-        }
-    }
-
-    private fun bindCameraUseCases(cameraProvider: ProcessCameraProvider) {
-        // Get screen metrics
-        val metrics = DisplayMetrics().also { 
-            binding.previewView.display.getRealMetrics(it) 
-        }
-        val screenAspectRatio = aspectRatio(metrics.widthPixels, metrics.heightPixels)
-        val rotation = binding.previewView.display.rotation
-
-        // Preview
-        val preview = Preview.Builder()
-            .setTargetAspectRatio(screenAspectRatio)
-            .setTargetRotation(rotation)
-            .build()
-            .also {
-                it.setSurfaceProvider(binding.previewView.surfaceProvider)
-            }
-
-        // ImageAnalysis
-        imageAnalyzer = ImageAnalysis.Builder()
-            .setTargetAspectRatio(screenAspectRatio)
-            .setTargetRotation(rotation)
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .build()
-            .also {
-                it.setAnalyzer(cameraExecutor) { imageProxy ->
-                    if (!isProcessing) {
-                        processImage(imageProxy)
-                    } else {
-                        imageProxy.close()
-                    }
-                }
-            }
-
-        try {
-            cameraProvider.unbindAll()
-            cameraProvider.bindToLifecycle(
-                viewLifecycleOwner,
-                CameraSelector.DEFAULT_BACK_CAMERA,
-                preview,
-                imageAnalyzer
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Use case binding failed", e)
-        }
-    }
-
-    private fun aspectRatio(width: Int, height: Int): Int {
-        val previewRatio = max(width, height).toDouble() / min(width, height)
-        if (abs(previewRatio - RATIO_4_3_VALUE) <= abs(previewRatio - RATIO_16_9_VALUE)) {
-            return AspectRatio.RATIO_4_3
-        }
-        return AspectRatio.RATIO_16_9
-    }
-
-    override fun onDestroyView() {
-        super.onDestroyView()
-        // Restore system UI
-        requireActivity().window.apply {
-            clearFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
-            decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
-        }
-        _binding = null
-    }
-
-    companion object {
-        private const val RATIO_4_3_VALUE = 4.0 / 3.0
-        private const val RATIO_16_9_VALUE = 16.0 / 9.0
-        // ... other companion object properties
-    }
-
-    // ... rest of the implementation
-}
-```
-
-And update the DetectionOverlay view to match the camera preview:
-
-```kotlin
-class DetectionOverlay @JvmOverloads constructor(
-    context: Context,
-    attrs: AttributeSet? = null,
-    defStyleAttr: Int = 0
-) : View(context, attrs, defStyleAttr) {
-    private val paint = Paint().apply {
-        style = Paint.Style.STROKE
-        strokeWidth = 4f
-        color = Color.RED
-    }
-
-    private val textPaint = Paint().apply {
-        color = Color.WHITE
-        textSize = 48f
-        style = Paint.Style.FILL
-        setShadowLayer(4f, 0f, 0f, Color.BLACK)
-    }
-
-    private var detectionResults: DetectionResult? = null
-    private var scaleFactor: Float = 1f
-    private var previewWidth: Int = 0
-    private var previewHeight: Int = 0
-
-    fun updateResults(results: DetectionResult) {
-        detectionResults = results
-        invalidate()
-    }
-
-    fun setPreviewSize(width: Int, height: Int) {
-        previewWidth = width
-        previewHeight = height
-        calculateScaleFactor()
-    }
-
-    private fun calculateScaleFactor() {
-        if (previewWidth == 0 || previewHeight == 0) return
-        
-        val viewRatio = width.toFloat() / height
-        val previewRatio = previewWidth.toFloat() / previewHeight
-        
-        scaleFactor = if (viewRatio > previewRatio) {
-            height.toFloat() / previewHeight
-        } else {
-            width.toFloat() / previewWidth
-        }
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-        
-        detectionResults?.let { result ->
-            // Scale and draw detection boxes
-            result.boundingBoxes.forEachIndexed { index, box ->
-                val scaledBox = RectF(
-                    box.left * scaleFactor,
-                    box.top * scaleFactor,
-                    box.right * scaleFactor,
-                    box.bottom * scaleFactor
-                )
-                
-                canvas.drawRect(scaledBox, paint)
-                
-                // Draw label
-                val label = "${result.labels[index]} ${(result.confidences[index] * 100).toInt()}%"
-                canvas.drawText(label, scaledBox.left, scaledBox.top - 10f, textPaint)
-            }
-        }
-    }
-}
-```
-
-Key features of this implementation:
-
-1. Fullscreen Camera Preview:
-- Uses ConstraintLayout for proper scaling
-- Handles different aspect ratios
-- Maintains preview quality
-
-2. Properly Scaled Overlay:
-- Matches camera preview dimensions
-- Scales detection results correctly
-- Handles different screen sizes
-
-3. System UI Integration:
-- Transparent status bar
-- Edge-to-edge display
-- Proper cleanup
-
-To make this work, add these to your styles:
-
-```xml
-<!-- styles.xml -->
-<style name="FullscreenTheme" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-    <item name="android:windowTranslucentStatus">true</item>
-    <item name="android:windowTranslucentNavigation">true</item>
+// Add to styles.xml
+<style name="FullScreenTheme" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+    <item name="android:windowNoTitle">true</item>
+    <item name="android:windowFullscreen">true</item>
     <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
 </style>
+
+// Add to AndroidManifest.xml
+<activity
+    android:name=".ui.DetectionActivity"
+    android:theme="@style/FullScreenTheme"
+    android:screenOrientation="portrait" />
 ```
 
-Would you like me to explain any specific part in more detail or help with additional customization?</antArtifact>
+Key changes made:
+
+1. Activity Layout Management:
+- Proper container visibility switching
+- Better back stack handling
+- Clean fragment transitions
+
+2. Full Screen Implementation:
+- System UI flags for immersive mode
+- Proper window flags management
+- Support for notch/cutout devices
+
+3. Camera Preview:
+- Full screen preview
+- Proper aspect ratio handling
+- Matched overlay sizing
+
+4. Style and Theme:
+- No action bar
+- Full screen theme
+- Cut-out handling
+
+The flow is now:
+1. Activity starts with buttons visible
+2. When navigating to fragments, buttons are hidden
+3. Camera opens in full screen
+4. Back navigation restores buttons when appropriate
+
+To use this:
+
+1. Update your AndroidManifest.xml theme
+2. Implement the new layouts
+3. Update your activity and fragment code
+
+This will give you:
+- Clean UI transitions
+- Full screen camera
+- Proper navigation
+- No overlapping UI elements
+
+Would you like me to explain any part in more detail or help with additional UI improvements?</antArtifact>
