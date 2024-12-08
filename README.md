@@ -1,79 +1,51 @@
- Let's fix the camera preview to be truly full screen by modifying the PreviewView settings and layout. Here's the corrected implementation:
+ I see the camera configuration timeout error. Let's fix the camera setup with proper configuration and error handling:
 
-<antArtifact identifier="fullscreen-camera-fix" type="application/vnd.ant.code" language="kotlin" title="Fixed Full Screen Camera Implementation">
-```xml
-<!-- fragment_camera.xml -->
-<?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:background="@android:color/black">
-
-    <androidx.camera.view.PreviewView
-        android:id="@+id/preview_view"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:layout_gravity="center" />
-
-    <ai.setkpsw.objectdetection.ui.views.DetectionOverlay
-        android:id="@+id/detection_overlay"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent" />
-
-</FrameLayout>
-```
-
+<antArtifact identifier="camera-setup-fix" type="application/vnd.ant.code" language="kotlin" title="Fixed Camera Setup Implementation">
 ```kotlin
-// CameraFragment.kt
-@AndroidEntryPoint
 class CameraFragment : Fragment() {
+    private var _binding: FragmentCameraBinding? = null
+    private val binding get() = _binding!!
+
+    private lateinit var cameraExecutor: ExecutorService
+    private var camera: Camera? = null
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var preview: Preview? = null
+    private var imageAnalyzer: ImageAnalysis? = null
+    private var isProcessing = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        // Make truly fullscreen
-        requireActivity().window.apply {
-            setFlags(
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                WindowManager.LayoutParams.FLAG_FULLSCREEN,
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                WindowManager.LayoutParams.FLAG_FULLSCREEN
-            )
-            
-            decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    or View.SYSTEM_UI_FLAG_FULLSCREEN
-                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)
-        }
+        cameraExecutor = Executors.newSingleThreadExecutor()
     }
 
-    private fun bindCameraUseCases(cameraProvider: ProcessCameraProvider) {
-        // Get screen metrics
-        val metrics = DisplayMetrics().also { 
-            binding.previewView.display.getRealMetrics(it)
-        }
+    private fun startCamera() {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(requireContext())
 
-        // Set up the preview use case
-        val preview = Preview.Builder()
-            .setTargetResolution(Size(metrics.widthPixels, metrics.heightPixels))
-            .setTargetRotation(binding.previewView.display.rotation)
+        cameraProviderFuture.addListener({
+            try {
+                cameraProvider = cameraProviderFuture.get()
+                bindCameraUseCases()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to get camera provider", e)
+                Toast.makeText(context, "Failed to start camera: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }, ContextCompat.getMainExecutor(requireContext()))
+    }
+
+    private fun bindCameraUseCases() {
+        val cameraProvider = cameraProvider ?: throw IllegalStateException("Camera initialization failed.")
+        val rotation = binding.previewView.display.rotation
+
+        // Configure Preview
+        preview = Preview.Builder()
+            .setTargetRotation(rotation)
             .build()
 
-        // Configure the preview view
-        binding.previewView.apply {
-            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
-            scaleType = PreviewView.ScaleType.FILL_CENTER
-        }
-
-        preview.setSurfaceProvider(binding.previewView.surfaceProvider)
-
-        // Set up image analysis use case
+        // Configure ImageAnalysis
         imageAnalyzer = ImageAnalysis.Builder()
-            .setTargetResolution(Size(metrics.widthPixels, metrics.heightPixels))
-            .setTargetRotation(binding.previewView.display.rotation)
+            .setTargetRotation(rotation)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
             .build()
             .also {
                 it.setAnalyzer(cameraExecutor) { imageProxy ->
@@ -87,12 +59,13 @@ class CameraFragment : Fragment() {
 
         try {
             cameraProvider.unbindAll()
-            
+
             // Select back camera
             val cameraSelector = CameraSelector.Builder()
                 .requireLensFacing(CameraSelector.LENS_FACING_BACK)
                 .build()
 
+            // Set up the camera
             camera = cameraProvider.bindToLifecycle(
                 viewLifecycleOwner,
                 cameraSelector,
@@ -100,76 +73,139 @@ class CameraFragment : Fragment() {
                 imageAnalyzer
             )
 
-            // Set initial camera settings
+            // Set up preview surface
+            preview?.setSurfaceProvider(binding.previewView.surfaceProvider)
+
+            // Configure camera control
             camera?.cameraControl?.apply {
-                setLinearZoom(0f)
-                enableTorch(false)
+                // Set capture mode to minimize latency
+                setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                    Range(15, 30)
+                )
+                // Enable auto-focus
+                setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AF_MODE,
+                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                )
             }
+
         } catch (e: Exception) {
             Log.e(TAG, "Use case binding failed", e)
+            Toast.makeText(
+                context,
+                "Failed to bind camera use cases: ${e.message}",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+
+        // Configure PreviewView
+        binding.previewView.apply {
+            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+        }
+
+        if (allPermissionsGranted()) {
+            startCamera()
+        } else {
+            requestPermissions(
+                arrayOf(Manifest.permission.CAMERA),
+                REQUEST_CODE_PERMISSIONS
+            )
         }
     }
 
     override fun onDestroyView() {
         super.onDestroyView()
-        // Restore window flags
-        requireActivity().window.apply {
-            clearFlags(
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                WindowManager.LayoutParams.FLAG_FULLSCREEN
-            )
-            decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+        try {
+            cameraProvider?.unbindAll()
+            cameraExecutor.shutdown()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error cleaning up camera", e)
         }
         _binding = null
+    }
+
+    companion object {
+        private const val TAG = "CameraFragment"
+        private const val REQUEST_CODE_PERMISSIONS = 10
     }
 }
 ```
 
-```xml
-<!-- Add to themes.xml -->
-<style name="Theme.YourApp.FullScreen" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-    <item name="android:windowNoTitle">true</item>
-    <item name="android:windowFullscreen">true</item>
-    <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
-    <item name="android:navigationBarColor">@android:color/transparent</item>
-    <item name="android:statusBarColor">@android:color/transparent</item>
-    <item name="android:windowTranslucentStatus">true</item>
-    <item name="android:windowTranslucentNavigation">true</item>
-</style>
-```
+And make sure your layout is properly configured:
 
 ```xml
-<!-- Update in AndroidManifest.xml -->
-<activity
-    android:name=".ui.DetectionActivity"
-    android:theme="@style/Theme.YourApp.FullScreen"
-    android:screenOrientation="portrait"
-    android:exported="true">
-    <intent-filter>
-        <action android:name="android.intent.action.MAIN" />
-        <category android:name="android.intent.category.LAUNCHER" />
-    </intent-filter>
-    
-    <!-- Add support for edge-to-edge display -->
-    <meta-data
-        android:name="android.max_aspect"
-        android:value="2.4" />
-</activity>
+<!-- fragment_camera.xml -->
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <androidx.camera.view.PreviewView
+        android:id="@+id/preview_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <ai.setkpsw.objectdetection.ui.views.DetectionOverlay
+        android:id="@+id/detection_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+</FrameLayout>
 ```
 
 Key changes made:
-1. Simplified layout to use FrameLayout
-2. Using FILL_CENTER scale type for PreviewView
-3. Setting target resolution to match screen size
-4. Proper fullscreen flags
-5. Translucent status and navigation bars
-6. Performance implementation mode for PreviewView
 
-This implementation should:
-1. Fill the entire screen
-2. Handle notch areas correctly
-3. Maintain proper aspect ratio
-4. Hide system bars
-5. Provide better performance
+1. Added proper camera configuration:
+```kotlin
+camera?.cameraControl?.apply {
+    setCaptureRequestOption(
+        CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+        Range(15, 30)
+    )
+    setCaptureRequestOption(
+        CaptureRequest.CONTROL_AF_MODE,
+        CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+    )
+}
+```
 
-Would you like me to explain any part in more detail or help with additional adjustments?</antArtifact>
+2. Improved error handling:
+```kotlin
+try {
+    cameraProvider = cameraProviderFuture.get()
+    bindCameraUseCases()
+} catch (e: Exception) {
+    Log.e(TAG, "Failed to get camera provider", e)
+    Toast.makeText(context, "Failed to start camera: ${e.message}", Toast.LENGTH_SHORT).show()
+}
+```
+
+3. Better cleanup:
+```kotlin
+override fun onDestroyView() {
+    super.onDestroyView()
+    try {
+        cameraProvider?.unbindAll()
+        cameraExecutor.shutdown()
+    } catch (e: Exception) {
+        Log.e(TAG, "Error cleaning up camera", e)
+    }
+    _binding = null
+}
+```
+
+4. Proper PreviewView configuration:
+```kotlin
+binding.previewView.apply {
+    implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+    scaleType = PreviewView.ScaleType.FILL_CENTER
+}
+```
+
+This should resolve the camera configuration timeout issue. Would you like me to explain any part in more detail?</antArtifact>
