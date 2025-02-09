@@ -1,27 +1,33 @@
-I see the issues. Let me help you fix them. The main problems are related to View/Layout references and type mismatches. Here's the corrected version:
+Let me help clarify. There are two approaches we can take:
+
+1. Using existing DetectionOverlay:
+- Create multiple DetectionOverlay views, one for each model
+- Arrange them in a grid layout
+- Each will handle its own drawing
+
+2. Creating a new combined overlay:
+- Single view that handles all model results
+- Divides its canvas into sections
+- Draws all results itself
+
+Given that you already have a working DetectionOverlay class, I'd recommend approach #1. It will be simpler and reuse your existing code. Let me show you a cleaner version:
 
 class DetectionOverlayAll @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
     defStyleAttr: Int = 0
-) : View(context, attrs, defStyleAttr) {
+) : ViewGroup(context, attrs, defStyleAttr) {
     
     private val overlayViews = mutableListOf<DetectionOverlay>()
     private val modelLabels = mutableListOf<TextView>()
-    private var columns = 2 // Default to 2 columns
-    
-    // Add ViewGroup.LayoutParams for child views
-    private class OverlayLayoutParams : ViewGroup.MarginLayoutParams {
-        constructor(width: Int, height: Int) : super(width, height)
-        constructor(source: ViewGroup.LayoutParams) : super(source)
-    }
+    private var columns = 2
 
     fun setModels(modelCount: Int) {
-        // Remove existing views
+        removeAllViews()
         overlayViews.clear()
         modelLabels.clear()
         
-        // Calculate grid dimensions
+        // Calculate grid size
         columns = when {
             modelCount <= 2 -> 1
             modelCount <= 4 -> 2
@@ -30,39 +36,24 @@ class DetectionOverlayAll @JvmOverloads constructor(
         
         // Create views for each model
         repeat(modelCount) { index ->
-            // Create container for each model
-            val containerParams = OverlayLayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-            
-            // Add model label
+            // Create label
             val label = TextView(context).apply {
                 textSize = 16f
                 setTextColor(Color.WHITE)
                 gravity = Gravity.CENTER
                 setPadding(8, 8, 8, 8)
                 setBackgroundColor(Color.argb(150, 0, 0, 0))
-                layoutParams = OverlayLayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                )
             }
             modelLabels.add(label)
+            addView(label)
             
-            // Add detection overlay
-            val overlay = DetectionOverlay(context).apply {
-                layoutParams = OverlayLayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
-            }
+            // Create overlay
+            val overlay = DetectionOverlay(context)
             overlayViews.add(overlay)
+            addView(overlay)
         }
-        invalidate()
-        requestLayout()
     }
-    
+
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val width = MeasureSpec.getSize(widthMeasureSpec)
         val height = MeasureSpec.getSize(heightMeasureSpec)
@@ -71,90 +62,78 @@ class DetectionOverlayAll @JvmOverloads constructor(
         val rows = ceil(overlayViews.size.toFloat() / columns).toInt()
         val childHeight = height / rows
         
-        // Measure child views
-        overlayViews.forEachIndexed { index, overlay ->
-            val label = modelLabels[index]
-            
+        // Measure all children
+        for (i in 0 until childCount step 2) {
             // Measure label
-            val labelSpec = MeasureSpec.makeMeasureSpec(childWidth, MeasureSpec.AT_MOST)
-            label.measure(labelSpec, MeasureSpec.UNSPECIFIED)
+            val label = getChildAt(i) as TextView
+            label.measure(
+                MeasureSpec.makeMeasureSpec(childWidth, MeasureSpec.EXACTLY),
+                MeasureSpec.makeMeasureSpec(height/10, MeasureSpec.AT_MOST)
+            )
             
             // Measure overlay
-            val overlayHeight = childHeight - label.measuredHeight
+            val overlay = getChildAt(i + 1) as DetectionOverlay
             overlay.measure(
                 MeasureSpec.makeMeasureSpec(childWidth, MeasureSpec.EXACTLY),
-                MeasureSpec.makeMeasureSpec(overlayHeight, MeasureSpec.EXACTLY)
+                MeasureSpec.makeMeasureSpec(childHeight - label.measuredHeight, MeasureSpec.EXACTLY)
             )
         }
         
         setMeasuredDimension(width, height)
     }
-    
-    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
-        val width = right - left
+
+    override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+        val width = r - l
         val childWidth = width / columns
-        val rows = ceil(overlayViews.size.toFloat() / columns).toInt()
-        val childHeight = (bottom - top) / rows
+        val rows = ceil((childCount/2).toFloat() / columns).toInt()
+        val totalHeight = b - t
+        val cellHeight = totalHeight / rows
         
-        overlayViews.forEachIndexed { index, overlay ->
+        for (i in 0 until childCount step 2) {
+            val index = i / 2
             val row = index / columns
             val col = index % columns
             
-            val childLeft = col * childWidth
-            val childTop = row * childHeight
+            val cellLeft = col * childWidth
+            val cellTop = row * cellHeight
             
             // Layout label
-            val label = modelLabels[index]
+            val label = getChildAt(i) as TextView
             label.layout(
-                childLeft,
-                childTop,
-                childLeft + childWidth,
-                childTop + label.measuredHeight
+                cellLeft,
+                cellTop,
+                cellLeft + childWidth,
+                cellTop + label.measuredHeight
             )
             
             // Layout overlay
+            val overlay = getChildAt(i + 1) as DetectionOverlay
             overlay.layout(
-                childLeft,
-                childTop + label.measuredHeight,
-                childLeft + childWidth,
-                childTop + childHeight
+                cellLeft,
+                cellTop + label.measuredHeight,
+                cellLeft + childWidth,
+                cellTop + cellHeight
             )
         }
     }
-    
-    fun updateModelResult(index: Int, result: DetectionResultWithTiming) {
+
+    fun updateModelResult(index: Int, bitmap: Bitmap, result: DetectionResult, modelName: String, inferenceTime: Long) {
         if (index < overlayViews.size) {
-            overlayViews[index].updateResults(result.bitmap, result.detectionResult)
-            modelLabels[index].text = "${result.modelName} (${result.inferenceTime}ms)"
-            invalidate()
+            overlayViews[index].updateResults(bitmap, result)
+            modelLabels[index].text = "$modelName (${inferenceTime}ms)"
         }
     }
 }
 
-// Data class to hold detection results with timing information
-data class DetectionResultWithTiming(
-    val modelName: String,
-    val detectionResult: DetectionResult,
-    val bitmap: Bitmap,
-    val inferenceTime: Long
-)
+This implementation:
+1. Extends ViewGroup to manage multiple DetectionOverlay views
+2. Creates a grid of DetectionOverlay instances
+3. Adds labels above each overlay
+4. Reuses your existing DetectionOverlay class
 
-Key fixes made:
-
-1. Added proper `LayoutParams` inner class to handle layout parameters
-2. Fixed view hierarchy management by properly handling child views
-3. Added proper measurement and layout logic
-4. Created a `DetectionResultWithTiming` data class to fix the type mismatch
-5. Fixed the `updateModelResult` method to handle the correct result type
-6. Properly implemented View measurement and layout callbacks
-7. Added proper view invalidation calls
-
-Usage in your Fragment would be:
-
+Usage in fragment:
 ```kotlin
 class RealtimeDetectionFragment : Fragment() {
-    private lateinit var binding: FragmentRealtimeDetectionBinding
-    
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         binding.detectionOverlayAll.setModels(detectors.size)
@@ -169,15 +148,14 @@ class RealtimeDetectionFragment : Fragment() {
                 val result = detector.detect(bitmap)
                 val endTime = System.currentTimeMillis()
                 
-                val resultWithTiming = DetectionResultWithTiming(
-                    modelName = detector::class.simpleName ?: "Unknown",
-                    detectionResult = result,
-                    bitmap = bitmap,
-                    inferenceTime = endTime - startTime
-                )
-                
                 withContext(Dispatchers.Main) {
-                    binding.detectionOverlayAll.updateModelResult(index, resultWithTiming)
+                    binding.detectionOverlayAll.updateModelResult(
+                        index,
+                        bitmap,
+                        result,
+                        detector::class.simpleName ?: "Unknown",
+                        endTime - startTime
+                    )
                 }
             }
         }
@@ -185,4 +163,12 @@ class RealtimeDetectionFragment : Fragment() {
 }
 ```
 
-This should resolve all the reference and type mismatch errors you were seeing. Would you like me to explain any part of these fixes in more detail?
+XML layout:
+```xml
+<com.your.package.DetectionOverlayAll
+    android:id="@+id/detectionOverlayAll"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent" />
+```
+
+Would you like me to explain any part in more detail?
