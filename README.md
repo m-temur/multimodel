@@ -1,12 +1,8 @@
-BULUŞUN VARSA DEZAVANTAJLARI:
+Web ile olan ilişkiden bahsedebilir miyiz? Aşağıdaki şekilde örnek olarak:
 
-Buluş, mobil cihazlar üzerinden çalıştığı için donanım kısıtlamalarına bağlı olarak performans değişkenlik gösterebilir. Yüksek çözünürlüklü görüntülerin işlenmesi, bellek ve işlem gücü tüketimini artırabilir.
+Sistem, model yönetimi ve güncelleme süreçlerini web sunucusu ile entegre bir şekilde yürütmektedir. Modelin geliştirilmesi veya güncellenmesi gerektiğinde, sistem tarafından kameradan elde edilen görseller toplanarak sunucuya aktarılır. Sunucu üzerinde çalışan yazılım, bu görselleri analiz ederek model eğitimi sürecini başlatır.
 
-Gerçek zamanlı algılama sürecinde, mobil cihazın işlem kapasitesine bağlı olarak gecikmeler yaşanabilir. Bu durum, endüstriyel uygulamalarda anlık tespitlerin doğruluğunu etkileyebilir.
+Eğitim sürecinin ilerleyişi, sunucu ile entegre çalışan yazılım tarafından anlık olarak izlenebilir. Eğitim tamamlandığında, oluşturulan yeni model veya güncellenmiş versiyon, belirlenen formatta mobil cihaza gönderilir. Kullanıcı herhangi bir ek işlem yapmaksızın, güncellenmiş modeli doğrudan mobil cihaz üzerinden kullanabilir.
 
-Anomali algılama yöntemleri, veri kümesine bağlı olduğu için yanlış pozitif veya yanlış negatif sonuçlar üretebilir. Modelin farklı üretim hatlarına genelleştirilmesi için sürekli iyileştirme ve güncelleme gerekmektedir.
-
-Sistem, model dosyalarının güncellenmesini ve yönetilmesini gerektirir. Yeni model ekleme süreci, mevcut sistemle uyumluluğun korunmasını ve sürekli entegrasyonu gerektirebilir.
-
-Son olarak, kullanıcı deneyimi açısından, model seçimi ve algılama türü belirleme süreçleri, kullanıcılar için karmaşık olabilir. Bu nedenle, kullanıcı dostu bir arayüz ve rehberlik mekanizmaları sağlanmalıdır.
+Bu entegrasyon sayesinde, model eğitimi merkezi bir sunucu üzerinde gerçekleştirildiğinden, cihazın işlem gücü üzerindeki yük azaltılmış olur. Aynı zamanda, güncellenen modeller anında dağıtılarak, sistemin her zaman en güncel ve optimize edilmiş versiyonu kullanılabilir.
 
