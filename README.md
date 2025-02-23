@@ -1,293 +1,118 @@
-I'll help you modify the DetectionOverlay to handle dynamic results using GridLayout. Based on your current code that handles single detector results, here's how we can adapt it for multiple detectors:
+You're right. Let's add a simple overlap avoidance while keeping the code relatively straightforward. Here's a modified version:
 
-// DetectionOverlayAll.kt
-class DetectionOverlayAll @JvmOverloads constructor(
-    context: Context,
-    attrs: AttributeSet? = null,
-    defStyleAttr: Int = 0
-) : GridLayout(context, attrs, defStyleAttr) {
-
-    private val overlays = mutableMapOf<ModelType, DetectionOverlay>()
-    private var gridSize = 1
+class DetectionOverlay : View {
+    private val usedPositions = mutableSetOf<RectF>()
+    private val offset = 20f
     
-    init {
-        clipChildren = true
-        clipToPadding = true
-    }
-
-    fun setupGrid(detectorCount: Int) {
-        // Calculate grid dimensions (e.g., 2x2 for 4 detectors)
-        gridSize = ceil(sqrt(detectorCount.toDouble())).toInt()
+    private fun findLabelPosition(box: RectF, label: String, textBounds: Rect): Point {
+        var textX: Float
+        var textY = box.centerY()
         
-        rowCount = gridSize
-        columnCount = gridSize
-        
-        // Clear existing overlays
-        removeAllViews()
-        overlays.clear()
-        
-        // Create overlay for each detector
-        ModelType.values().take(detectorCount).forEachIndexed { index, modelType ->
-            val overlay = DetectionOverlay(context).apply {
-                layoutParams = createGridLayoutParams(index)
-            }
-            overlays[modelType] = overlay
-            addView(overlay)
+        // Initial X position
+        textX = if (box.right + textBounds.width() + offset >= width) {
+            box.left - textBounds.width() - offset  // Left side if near screen edge
+        } else {
+            box.right + offset  // Right side by default
         }
-    }
-
-    private fun createGridLayoutParams(index: Int): GridLayout.LayoutParams {
-        return GridLayout.LayoutParams().apply {
-            width = 0
-            height = 0
-            rowSpec = GridLayout.spec(index / gridSize, 1, 1f)
-            columnSpec = GridLayout.spec(index % gridSize, 1, 1f)
-            setMargins(2, 2, 2, 2)
-        }
-    }
-
-    fun updateResults(results: Map<ModelType, DetectionResultWithTiming>) {
-        results.forEach { (modelType, result) ->
-            overlays[modelType]?.let { overlay ->
-                when (result.detectionResult) {
-                    is DetectionResult.Anomaly -> {
-                        overlay.updateAnomalyDetectionResults(
-                            result.detectionResult.heatmap,
-                            result.detectionResult.label.toString()
-                        )
-                    }
-                    is DetectionResult.ObjectDetection -> {
-                        overlay.updateObjectDetectionResults(result.detectionResult.detections)
-                    }
+        
+        // Create rectangle for this label
+        val labelRect = RectF(
+            textX,
+            textY - textBounds.height(),
+            textX + textBounds.width(),
+            textY + textBounds.height()
+        )
+        
+        // Check for overlaps and adjust Y position if needed
+        while (hasOverlap(labelRect)) {
+            // Move label down and update rectangle
+            textY += textBounds.height() + offset
+            
+            // If we're going off screen bottom, start from top
+            if (textY + textBounds.height() > height) {
+                textY = 0f + textBounds.height()
+                // Try other side of box if still overlapping
+                if (textX == box.right + offset) {
+                    textX = box.left - textBounds.width() - offset
                 }
             }
+            
+            labelRect.set(
+                textX,
+                textY - textBounds.height(),
+                textX + textBounds.width(),
+                textY + textBounds.height()
+            )
         }
-        invalidate()
+        
+        // Add final position to used positions
+        usedPositions.add(labelRect)
+        
+        return Point(textX, textY)
     }
-}
-
-// DetectionOverlay.kt (Modified version of your existing class)
-class DetectionOverlay @JvmOverloads constructor(
-    context: Context,
-    attrs: AttributeSet? = null,
-    defStyleAttr: Int = 0
-) : View(context, attrs, defStyleAttr) {
-
-    private var scaledBitmap: Bitmap? = null
-    private var anomalyHeatmap: Bitmap? = null
-    private var boundingBoxes = mutableListOf<Pair<RectF, String>>()
-    private var anomalyLabel = ""
-    private var captureMode = CaptureMode.PHOTO
     
-    private val roiPaint = Paint().apply {
-        color = Color.RED
-        style = Paint.Style.STROKE
-        strokeWidth = 2f
+    private fun hasOverlap(rect: RectF): Boolean {
+        for (used in usedPositions) {
+            if (RectF.intersects(used, rect)) {
+                return true
+            }
+        }
+        return false
     }
-
-    private val boundingBoxPaint = Paint().apply {
-        color = Color.argb(150, 0, 255, 0)
-        style = Paint.Style.FILL
-    }
-
-    private val textPaint = Paint().apply {
-        color = Color.RED
-        textSize = 48f
-        style = Paint.Style.FILL
-        isFakeBoldText = true
-    }
-
-    private val heatmapPaint = Paint()
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-
-        scaledBitmap?.let { bitmap ->
-            // Calculate scaling to fit view
-            val (scaledRect, scale, dx, dy) = calculateScaledDimensions(bitmap)
+        
+        // Clear previous positions
+        usedPositions.clear()
+        
+        boundingBoxes.forEach { (box, label) ->
+            // Draw bounding box
+            canvas.drawRect(box, boundingBoxPaint)
             
-            if (captureMode == CaptureMode.PHOTO) {
-                canvas.drawBitmap(bitmap, null, scaledRect, null)
-            }
-
-            // Draw anomaly heatmap if available
-            anomalyHeatmap?.let { heatmap ->
-                val roiRect = RectF(
-                    scaledRect.left.toFloat(),
-                    scaledRect.top.toFloat(),
-                    scaledRect.right.toFloat(),
-                    scaledRect.bottom.toFloat()
-                )
-                canvas.drawBitmap(heatmap, null, roiRect, heatmapPaint)
-                
-                // Draw anomaly label
-                if (anomalyLabel.isNotEmpty()) {
-                    canvas.drawText(anomalyLabel, 50f, 100f, textPaint)
-                }
-            }
-
-            // Draw bounding boxes
-            boundingBoxes.forEach { (box, label) ->
-                val adjustedRect = RectF(
-                    box.left * scale + dx,
-                    box.top * scale + dy,
-                    box.right * scale + dx,
-                    box.bottom * scale + dy
-                )
-                canvas.drawRect(adjustedRect, boundingBoxPaint)
-                
-                // Draw label above bounding box
-                val textX = adjustedRect.left
-                val textY = adjustedRect.top - 10f
-                canvas.drawText(label, textX, textY, textPaint)
-            }
-        }
-    }
-
-    private fun calculateScaledDimensions(bitmap: Bitmap): ScaledDimensions {
-        val viewWidth = width.toFloat()
-        val viewHeight = height.toFloat()
-        val imageAspectRatio = bitmap.width.toFloat() / bitmap.height.toFloat()
-        val viewAspectRatio = viewWidth / viewHeight
-        
-        val scale: Float
-        val dx: Float
-        val dy: Float
-        
-        if (viewAspectRatio > imageAspectRatio) {
-            scale = viewHeight / bitmap.height
-            dy = 0f
-            dx = (viewWidth - (bitmap.width * scale)) / 2f
-        } else {
-            scale = viewWidth / bitmap.width
-            dx = 0f
-            dy = (viewHeight - (bitmap.height * scale)) / 2f
-        }
-        
-        val scaledRect = RectF(
-            dx,
-            dy,
-            viewWidth - dx,
-            viewHeight - dy
-        )
-        
-        return ScaledDimensions(scaledRect, scale, dx, dy)
-    }
-
-    fun updateResults(
-        orgBitmap: Bitmap,
-        image: Bitmap,
-        detectionResult: DetectionResultWithTiming,
-        mode: CaptureMode
-    ) {
-        scaledBitmap = orgBitmap
-        captureMode = mode
-        
-        when (detectionResult.detectionResult) {
-            is DetectionResult.Anomaly -> {
-                updateAnomalyDetectionResults(
-                    detectionResult.detectionResult.heatmap,
-                    detectionResult.detectionResult.label.toString()
-                )
-            }
-            is DetectionResult.ObjectDetection -> {
-                updateObjectDetectionResults(detectionResult.detectionResult.detections)
-            }
-        }
-        
-        invalidate()
-    }
-
-    fun updateObjectDetectionResults(detectionResults: List<Pair<RectF, String>>) {
-        boundingBoxes.clear()
-        boundingBoxes.addAll(detectionResults)
-        anomalyHeatmap = null
-        anomalyLabel = ""
-        invalidate()
-    }
-
-    fun updateAnomalyDetectionResults(heatmap: Bitmap, label: String) {
-        anomalyHeatmap = heatmap
-        anomalyLabel = label
-        boundingBoxes.clear()
-        invalidate()
-    }
-
-    private data class ScaledDimensions(
-        val rect: RectF,
-        val scale: Float,
-        val dx: Float,
-        val dy: Float
-    )
-}
-
-// Usage in your Fragment/Activity
-class MultiDetectionFragment : Fragment() {
-    private lateinit var overlayAll: DetectionOverlayAll
-    
-    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        super.onViewCreated(view, savedInstanceState)
-        
-        overlayAll = view.findViewById(R.id.overlayAll)
-        
-        // Setup grid based on active detectors
-        val activeDetectors = ModelType.values().size
-        overlayAll.setupGrid(activeDetectors)
-        
-        // Update results when available
-        viewModel.detectionResults.observe(viewLifecycleOwner) { results ->
-            overlayAll.updateResults(results)
+            // Calculate text bounds
+            val textBounds = Rect()
+            textPaint.getTextBounds(label, 0, label.length, textBounds)
+            
+            // Get non-overlapping position for label
+            val position = findLabelPosition(box, label, textBounds)
+            
+            // Draw label
+            canvas.drawText(label, position.x, position.y, textPaint)
+            
+            // Optionally draw a line connecting label to box
+            canvas.drawLine(
+                if (position.x < box.left) box.left else box.right,
+                box.centerY(),
+                position.x + if (position.x < box.left) textBounds.width() else 0f,
+                position.y,
+                textPaint
+            )
         }
     }
 }
 
-// layout/fragment_multi_detection.xml
-<?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent">
+This simpler approach still:
+1. Tries to place labels on the right or left of boxes
+2. If there's overlap, moves the label down
+3. If we run out of vertical space, switches to the other side of the box
+4. Keeps track of used positions to avoid overlaps
+5. Optionally draws connecting lines to boxes
 
-    <androidx.camera.view.PreviewView
-        android:id="@+id/viewFinder"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+Key improvements:
+- Simple vertical stacking to avoid overlaps
+- Switches sides when running out of space
+- Still handles screen edges
+- Much simpler than the complex positioning algorithm
+- Added connecting lines to make it clear which label belongs to which box
 
-    <com.your.package.DetectionOverlayAll
-        android:id="@+id/overlayAll"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent" />
-
-</FrameLayout>
-
-Key changes made:
-
-1. Created `DetectionOverlayAll` class:
-   - Uses GridLayout to arrange multiple overlays
-   - Dynamically calculates grid size based on detector count
-   - Manages individual overlays for each detector
-
-2. Modified your existing `DetectionOverlay`:
-   - Made it more reusable for grid layout
-   - Added proper scaling calculations
-   - Maintained existing drawing functionality
-
-3. Added dynamic grid management:
-   - Automatically calculates rows and columns
-   - Equal sizing for all cells
-   - Proper margins and spacing
-
-4. Enhanced result handling:
-   - Supports both object detection and anomaly results
-   - Maintains aspect ratio of inputs
-   - Clear separation between detectors
-
-To use this:
-
-1. Replace your single overlay with `DetectionOverlayAll` in your layout
-2. Initialize the grid with your detector count
-3. Update results as they come in from detectors
+The main strategy is:
+1. Try right side first (unless near screen edge)
+2. If labels overlap, stack them vertically
+3. If run out of vertical space, try left side
+4. Keep track of used positions to prevent any overlaps
 
 Would you like me to:
-1. Add additional customization options for the grid layout?
-2. Implement alternative layout strategies?
-3. Add performance optimizations for the drawing?
+1. Add margins or padding adjustments?
+2. Modify the connecting line style?
+3. Add any other simple positioning strategies?
